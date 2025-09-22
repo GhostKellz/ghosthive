@@ -55,3 +55,7 @@ Run `zig build` to build the project.
 Run `zig build test` to run tests.
 
 Run `zig build run` to see a linear regression demo with Adam.
+
+## Documentation
+
+See [docs/](docs/) for API reference and examples.
