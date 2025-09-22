@@ -1,9 +1,13 @@
-<img src="assets/icons/ghosthive.png" alt="GhostHive Logo" width="200">
+<p align="center">
+  <img src="assets/icons/ghosthive.png" alt="GhostHive Logo" width="200">
+</p>
 
-[![Built with Zig](https://img.shields.io/badge/built%20with-Zig-yellow)](https://ziglang.org)
-[![Zig Version](https://img.shields.io/badge/zig-0.16.0--dev-orange)](https://ziglang.org/download)
-[![NVIDIA Tensor](https://img.shields.io/badge/NVIDIA-Tensor-green)](https://developer.nvidia.com/tensorrt)
-[![ADAM Optimizer](https://img.shields.io/badge/optimizer-ADAM-blue)](https://arxiv.org/abs/1412.6980)
+<p align="center">
+  [![Built with Zig](https://img.shields.io/badge/built%20with-Zig-yellow)](https://ziglang.org)
+  [![Zig Version](https://img.shields.io/badge/zig-0.16.0--dev-orange)](https://ziglang.org/download)
+  [![NVIDIA Tensor](https://img.shields.io/badge/NVIDIA-Tensor-green)](https://developer.nvidia.com/tensorrt)
+  [![ADAM Optimizer](https://img.shields.io/badge/optimizer-ADAM-blue)](https://arxiv.org/abs/1412.6980)
+</p>
 
 # GhostHive - Machine Learning Framework
 
