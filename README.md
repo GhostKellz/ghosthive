@@ -3,10 +3,12 @@
 </div>
 
 <div align="center">
-  [![Built with Zig](https://img.shields.io/badge/built%20with-Zig-yellow)](https://ziglang.org)
-  [![Zig Version](https://img.shields.io/badge/zig-0.16.0--dev-orange)](https://ziglang.org/download)
-  [![NVIDIA Tensor](https://img.shields.io/badge/NVIDIA-Tensor-green)](https://developer.nvidia.com/tensorrt)
-  [![ADAM Optimizer](https://img.shields.io/badge/optimizer-ADAM-blue)](https://arxiv.org/abs/1412.6980)
+  <a href="https://ziglang.org"><img src="https://img.shields.io/badge/built%20with-Zig-yellow" alt="Built with Zig"></a>
+  <a href="https://ziglang.org/download"><img src="https://img.shields.io/badge/zig-0.16.0--dev-orange" alt="Zig Version"></a>
+  <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/CUDA-blue" alt="CUDA"></a>
+  <a href="https://developer.nvidia.com/tensorrt"><img src="https://img.shields.io/badge/NVIDIA-Tensor-green" alt="NVIDIA Tensor"></a>
+  <a href="https://arxiv.org/abs/1412.6980"><img src="https://img.shields.io/badge/optimizer-ADAM-blue" alt="ADAM Optimizer"></a>
+  <a href="https://developer.nvidia.com/cuda-toolkit"><img src="https://img.shields.io/badge/NVIDIA-Open%20Optimized-lightgreen" alt="NVIDIA Open Optimized"></a>
 </div>
 
 # GhostHive - Machine Learning Framework
