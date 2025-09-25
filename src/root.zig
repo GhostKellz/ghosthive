@@ -1,6 +1,10 @@
 //! By convention, root.zig is the root source file when making a library.
 const std = @import("std");
 const builtin = @import("builtin");
+const build_options = @import("build_options");
+
+const gpu_enabled: bool = build_options.enable_gpu;
+pub const gpu_support_enabled = gpu_enabled;
 
 pub const TensorError = error{
     IncompatibleShapes,
@@ -182,6 +186,12 @@ pub const DeviceManager = struct {
         const cpu_device = Device.init(.cpu, 0, "CPU");
         try self.devices.append(self.allocator, cpu_device);
 
+        if (!gpu_enabled) {
+            self.current_device = &self.devices.items[0];
+            self.current_device.?.is_available = true;
+            return;
+        }
+
         // Detect CUDA devices (simulation for now)
         if (builtin.target.os.tag == .linux or builtin.target.os.tag == .windows) {
             // In a real implementation, we would call CUDA runtime API here
@@ -228,9 +238,7 @@ pub const DeviceManager = struct {
 
     fn detectCudaRuntime(self: *DeviceManager) bool {
         _ = self;
-        // In a real implementation, this would check for CUDA runtime
-        // For now, return false to avoid dependency issues
-        return false;
+        return gpu_enabled;
     }
 
     fn detectVulkanSupport(self: *DeviceManager) bool {
@@ -410,6 +418,12 @@ pub const CudaContext = struct {
             .device_count = 0,
         };
 
+        if (gpu_enabled) {
+            ctx.initialized = true;
+            ctx.device_count = 1;
+            return ctx;
+        }
+
         // Try to initialize CUDA
         const init_result = cuInit(0);
         if (init_result == .success) {
@@ -452,6 +466,11 @@ pub const GpuKernel = struct {
 
     fn vectorAddWithFallback(a: []const f32, b: []const f32, result: []f32, device: *const Device) TensorError!void {
         if (a.len != b.len or a.len != result.len) return TensorError.ShapeMismatch;
+
+        if (!gpu_enabled) {
+            if (device.isGpu()) return TensorError.GpuUnavailable;
+            return vectorAddCpu(a, b, result);
+        }
 
         switch (device.device_type) {
             .cpu => return vectorAddCpu(a, b, result),
@@ -680,6 +699,11 @@ pub const GpuKernel = struct {
     fn vectorMulWithFallback(a: []const f32, b: []const f32, result: []f32, device: *const Device) TensorError!void {
         if (a.len != b.len or a.len != result.len) return TensorError.ShapeMismatch;
 
+        if (!gpu_enabled) {
+            if (device.isGpu()) return TensorError.GpuUnavailable;
+            return vectorMulCpu(a, b, result);
+        }
+
         switch (device.device_type) {
             .cpu => return vectorMulCpu(a, b, result),
             .cuda => return vectorMulCuda(a, b, result),
@@ -750,6 +774,11 @@ pub const GpuKernel = struct {
                            m: usize, k: usize, n: usize, device: *const Device) TensorError!void {
         if (a.len != m * k or b.len != k * n or result.len != m * n) {
             return TensorError.ShapeMismatch;
+        }
+
+        if (!gpu_enabled) {
+            if (device.isGpu()) return TensorError.GpuUnavailable;
+            return matrixMulCpu(a, b, result, m, k, n);
         }
 
         switch (device.device_type) {
@@ -980,11 +1009,11 @@ pub const Tensor = struct {
         }
     }
 
-    pub fn add(self: *const Tensor, other: *const Tensor) !Tensor {
+    pub fn add(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
         const bs = broadcastShape(self.shape, other.shape) orelse {
             const err_ctx = shapeError(self.shape, other.shape, "tensor addition", @src());
             std.log.err("{any}", .{err_ctx});
-            return error.IncompatibleShapes;
+            return TensorError.IncompatibleShapes;
         };
         const new_shape = bs.shape[0..bs.len];
         var result = if (self.pool) |pool|
@@ -1070,8 +1099,8 @@ pub const Tensor = struct {
         }
     }
 
-    pub fn mul(self: *const Tensor, other: *const Tensor) !Tensor {
-        const bs = broadcastShape(self.shape, other.shape) orelse return error.IncompatibleShapes;
+    pub fn mul(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
+        const bs = broadcastShape(self.shape, other.shape) orelse return TensorError.IncompatibleShapes;
         const new_shape = bs.shape[0..bs.len];
         var result = if (self.pool) |pool|
             try Tensor.initWithPool(self.allocator, new_shape, pool)
@@ -1085,8 +1114,8 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn sub(self: *const Tensor, other: *const Tensor) !Tensor {
-        const bs = broadcastShape(self.shape, other.shape) orelse return error.IncompatibleShapes;
+    pub fn sub(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
+        const bs = broadcastShape(self.shape, other.shape) orelse return TensorError.IncompatibleShapes;
         const new_shape = bs.shape[0..bs.len];
         var result = if (self.pool) |pool|
             try Tensor.initWithPool(self.allocator, new_shape, pool)
@@ -1100,7 +1129,7 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn square(self: *const Tensor) !Tensor {
+    pub fn square(self: *const Tensor) TensorError!Tensor {
         var result = if (self.pool) |pool|
             try Tensor.initWithPool(self.allocator, self.shape, pool)
         else
@@ -1119,8 +1148,8 @@ pub const Tensor = struct {
         return total;
     }
 
-    pub fn transpose(self: *const Tensor) !Tensor {
-        if (self.shape.len != 2) return error.Not2D;
+    pub fn transpose(self: *const Tensor) TensorError!Tensor {
+        if (self.shape.len != 2) return TensorError.Not2D;
         const rows = self.shape[0];
         const cols = self.shape[1];
         var result = if (self.pool) |pool|
@@ -1135,9 +1164,9 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn matmul(self: *const Tensor, other: *const Tensor) !Tensor {
-        if (self.shape.len != 2 or other.shape.len != 2) return error.Not2D;
-        if (self.shape[1] != other.shape[0]) return error.ShapeMismatch;
+    pub fn matmul(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
+        if (self.shape.len != 2 or other.shape.len != 2) return TensorError.Not2D;
+        if (self.shape[1] != other.shape[0]) return TensorError.ShapeMismatch;
         const m = self.shape[0];
         const k = self.shape[1];
         const n = other.shape[1];
@@ -1164,8 +1193,8 @@ pub const Tensor = struct {
         }
     }
 
-    pub fn addSimd(self: *const Tensor, other: *const Tensor) !Tensor {
-        if (!std.mem.eql(usize, self.shape, other.shape)) return error.ShapeMismatch;
+    pub fn addSimd(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
+        if (!std.mem.eql(usize, self.shape, other.shape)) return TensorError.ShapeMismatch;
 
         var result = if (self.pool) |pool|
             try Tensor.initWithPool(self.allocator, self.shape, pool)
@@ -1190,8 +1219,8 @@ pub const Tensor = struct {
         return result;
     }
 
-    pub fn mulSimd(self: *const Tensor, other: *const Tensor) !Tensor {
-        if (!std.mem.eql(usize, self.shape, other.shape)) return error.ShapeMismatch;
+    pub fn mulSimd(self: *const Tensor, other: *const Tensor) TensorError!Tensor {
+        if (!std.mem.eql(usize, self.shape, other.shape)) return TensorError.ShapeMismatch;
 
         var result = if (self.pool) |pool|
             try Tensor.initWithPool(self.allocator, self.shape, pool)
@@ -1795,8 +1824,8 @@ pub const Sequential = struct {
 
         var current = try self.forwardLayer(input, self.layers.items[0]);
         for (self.layers.items[1..]) |layer| {
-            defer current.deinit();
             const next = try self.forwardLayer(&current, layer);
+            current.deinit();
             current = next;
         }
         return current;
@@ -1858,8 +1887,8 @@ pub const Linear = struct {
         };
     }
 
-    pub fn forward(self: *Linear, input: *const Tensor) !Tensor {
-        if (input.shape.len != 2 or input.shape[1] != self.weights.shape[0]) return error.ShapeMismatch;
+    pub fn forward(self: *Linear, input: *const Tensor) TensorError!Tensor {
+        if (input.shape.len != 2 or input.shape[1] != self.weights.shape[0]) return TensorError.ShapeMismatch;
         var out = try input.matmul(&self.weights);
         // add biases
         for (0..out.shape[0]) |i| {
@@ -1880,7 +1909,7 @@ pub const Linear = struct {
     }
 };
 
-pub fn relu(tensor: *const Tensor) !Tensor {
+pub fn relu(tensor: *const Tensor) TensorError!Tensor {
     var result = try Tensor.init(tensor.allocator, tensor.shape);
     for (0..tensor.data.len) |i| {
         result.data[i] = if (tensor.data[i] > 0) tensor.data[i] else 0;
@@ -1888,7 +1917,7 @@ pub fn relu(tensor: *const Tensor) !Tensor {
     return result;
 }
 
-pub fn sigmoid(tensor: *const Tensor) !Tensor {
+pub fn sigmoid(tensor: *const Tensor) TensorError!Tensor {
     var result = if (tensor.pool) |pool|
         try Tensor.initWithPool(tensor.allocator, tensor.shape, pool)
     else
@@ -1980,8 +2009,8 @@ pub fn softmax(tensor: *const Tensor) TensorError!Tensor {
     return result;
 }
 
-pub fn mseLoss(pred: *const Tensor, target: *const Tensor) !f32 {
-    if (!std.mem.eql(usize, pred.shape, target.shape)) return error.ShapeMismatch;
+pub fn mseLoss(pred: *const Tensor, target: *const Tensor) TensorError!f32 {
+    if (!std.mem.eql(usize, pred.shape, target.shape)) return TensorError.ShapeMismatch;
     var diff = try pred.sub(target);
     defer diff.deinit();
     var sq = try diff.square();
@@ -2388,7 +2417,7 @@ pub const LearningRateScheduler = struct {
     }
 };
 
-pub fn trainLinear(allocator: std.mem.Allocator, layer: *Linear, x: *const Tensor, y: *const Tensor, lr: f32, epochs: usize) !void {
+pub fn trainLinear(allocator: std.mem.Allocator, layer: *Linear, x: *const Tensor, y: *const Tensor, lr: f32, epochs: usize) TensorError!void {
     for (0..epochs) |_| {
         var pred = try layer.forward(x);
         defer pred.deinit();
@@ -2449,10 +2478,13 @@ pub const DataLoader = struct {
     indices: std.ArrayList(usize),
     allocator: std.mem.Allocator,
 
-    pub fn init(allocator: std.mem.Allocator, data: []const Tensor, targets: []const Tensor, batch_size: usize, shuffle: bool) !DataLoader {
+    pub fn init(allocator: std.mem.Allocator, data: []const Tensor, targets: []const Tensor, batch_size: usize, shuffle: bool) TensorError!DataLoader {
         var indices = std.ArrayList(usize){};
         for (0..data.len) |i| {
-            try indices.append(allocator, i);
+            indices.append(allocator, i) catch {
+                indices.deinit(allocator);
+                return TensorError.OutOfMemory;
+            };
         }
 
         var loader = DataLoader{
@@ -2592,9 +2624,22 @@ pub const Dataset = struct {
         self.targets.deinit(self.allocator);
     }
 
-    pub fn addSample(self: *Dataset, data: Tensor, target: Tensor) !void {
-        try self.data.append(self.allocator, data);
-        try self.targets.append(self.allocator, target);
+    pub fn addSample(self: *Dataset, data: Tensor, target: Tensor) TensorError!void {
+        var owned_data = data;
+        var owned_target = target;
+
+        self.data.append(self.allocator, owned_data) catch {
+            owned_data.deinit();
+            owned_target.deinit();
+            return TensorError.OutOfMemory;
+        };
+
+        self.targets.append(self.allocator, owned_target) catch {
+            const removed = self.data.pop();
+            removed.deinit();
+            owned_target.deinit();
+            return TensorError.OutOfMemory;
+        };
     }
 
     pub fn len(self: *const Dataset) usize {
@@ -2750,8 +2795,9 @@ pub const ComputationNode = struct {
     grad_fn: ?*const fn(node: *ComputationNode, grad: *const Tensor) TensorError!void,
     allocator: std.mem.Allocator,
     requires_grad: bool,
+    owns_tensor: bool,
 
-    pub fn init(allocator: std.mem.Allocator, tensor: *Tensor, node_type: ComputationNodeType) !ComputationNode {
+    pub fn init(allocator: std.mem.Allocator, tensor: *Tensor, node_type: ComputationNodeType) TensorError!ComputationNode {
         return ComputationNode{
             .id = 0,
             .node_type = node_type,
@@ -2762,6 +2808,7 @@ pub const ComputationNode = struct {
             .grad_fn = null,
             .allocator = allocator,
             .requires_grad = true,
+            .owns_tensor = false,
         };
     }
 
@@ -2770,26 +2817,39 @@ pub const ComputationNode = struct {
             grad.deinit();
             self.allocator.destroy(grad);
         }
+        if (self.owns_tensor) {
+            self.tensor.deinit();
+            self.allocator.destroy(self.tensor);
+        }
         self.parents.deinit(self.allocator);
         self.children.deinit(self.allocator);
     }
 
-    pub fn addParent(self: *ComputationNode, parent: *ComputationNode) !void {
-        try self.parents.append(self.allocator, parent);
-        try parent.children.append(parent.allocator, self);
+    pub fn addParent(self: *ComputationNode, parent: *ComputationNode) TensorError!void {
+        self.parents.append(self.allocator, parent) catch return TensorError.OutOfMemory;
+        parent.children.append(parent.allocator, self) catch return TensorError.OutOfMemory;
     }
 
     pub fn backward(self: *ComputationNode, grad: ?*const Tensor) TensorError!void {
         // Initialize gradient if not present
         if (self.gradient == null) {
             if (grad) |g| {
-                const g_clone = g.clone();
-                self.gradient = try self.allocator.create(Tensor);
-                self.gradient.?.* = g_clone;
+                var g_clone = g.clone();
+                const grad_ptr = self.allocator.create(Tensor) catch {
+                    g_clone.deinit();
+                    return TensorError.OutOfMemory;
+                };
+                grad_ptr.* = g_clone;
+                self.gradient = grad_ptr;
             } else {
                 // Create gradient of ones for final output
-                self.gradient = try self.allocator.create(Tensor);
-                self.gradient.?.* = try Tensor.init(self.allocator, self.tensor.shape);
+                const grad_ptr = self.allocator.create(Tensor) catch return TensorError.OutOfMemory;
+                const grad_tensor = Tensor.init(self.allocator, self.tensor.shape) catch |err| {
+                    self.allocator.destroy(grad_ptr);
+                    return err;
+                };
+                grad_ptr.* = grad_tensor;
+                self.gradient = grad_ptr;
                 for (self.gradient.?.data) |*val| {
                     val.* = 1.0;
                 }
@@ -2806,10 +2866,6 @@ pub const ComputationNode = struct {
             try grad_fn(self, self.gradient.?);
         }
 
-        // Propagate to parents
-        for (self.parents.items) |parent| {
-            try parent.backward(self.gradient);
-        }
     }
 };
 
@@ -2836,12 +2892,17 @@ pub const ComputationGraph = struct {
         self.nodes.deinit(self.allocator);
     }
 
-    pub fn createNode(self: *ComputationGraph, tensor: *Tensor, node_type: ComputationNodeType) !*ComputationNode {
-        const node = try self.allocator.create(ComputationNode);
+    pub fn createNode(self: *ComputationGraph, tensor: *Tensor, node_type: ComputationNodeType, owns_tensor: bool) TensorError!*ComputationNode {
+        const node = self.allocator.create(ComputationNode) catch return TensorError.OutOfMemory;
         node.* = try ComputationNode.init(self.allocator, tensor, node_type);
+        node.owns_tensor = owns_tensor;
         node.id = self.next_id;
         self.next_id += 1;
-        try self.nodes.append(self.allocator, node);
+        self.nodes.append(self.allocator, node) catch {
+            self.next_id -= 1;
+            self.allocator.destroy(node);
+            return TensorError.OutOfMemory;
+        };
 
         if (self.debug_mode) {
             std.debug.print("Created node {d} ({s}) with shape: ", .{ node.id, @tagName(node_type) });
@@ -2984,8 +3045,8 @@ pub const Variable = struct {
     graph: *ComputationGraph,
     requires_grad: bool,
 
-    pub fn init(graph: *ComputationGraph, tensor: *Tensor, requires_grad: bool) !Variable {
-        const node = try graph.createNode(tensor, .input);
+    pub fn init(graph: *ComputationGraph, tensor: *Tensor, requires_grad: bool) TensorError!Variable {
+    const node = try graph.createNode(tensor, .input, false);
         node.requires_grad = requires_grad;
         return Variable{
             .tensor = tensor,
@@ -2995,16 +3056,30 @@ pub const Variable = struct {
         };
     }
 
-    fn createTensorPtr(self: *const Variable, tensor_val: Tensor) !*Tensor {
-        const tensor_ptr = try self.graph.allocator.create(Tensor);
-        tensor_ptr.* = tensor_val;
+    fn createTensorPtr(self: *const Variable, tensor_val: Tensor) TensorError!*Tensor {
+        var owned_tensor = tensor_val;
+        const tensor_ptr = self.graph.allocator.create(Tensor) catch {
+            owned_tensor.deinit();
+            return TensorError.OutOfMemory;
+        };
+        tensor_ptr.* = owned_tensor;
         return tensor_ptr;
     }
 
-    pub fn add(self: *const Variable, other: *const Variable) !Variable {
+    pub fn add(self: *const Variable, other: *const Variable) TensorError!Variable {
         const result_tensor_val = try self.tensor.add(other.tensor);
         const result_tensor = try self.createTensorPtr(result_tensor_val);
-        const result_node = try self.graph.createNode(result_tensor, .add);
+        const result_node = self.graph.createNode(result_tensor, .add, true) catch |err| {
+            result_tensor.deinit();
+            self.graph.allocator.destroy(result_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            result_node.deinit();
+            self.graph.allocator.destroy(result_node);
+        }
         result_node.grad_fn = addGradFn;
 
         try result_node.addParent(self.node);
@@ -3018,10 +3093,20 @@ pub const Variable = struct {
         };
     }
 
-    pub fn mul(self: *const Variable, other: *const Variable) !Variable {
+    pub fn mul(self: *const Variable, other: *const Variable) TensorError!Variable {
         const result_tensor_val = try self.tensor.mul(other.tensor);
         const result_tensor = try self.createTensorPtr(result_tensor_val);
-        const result_node = try self.graph.createNode(result_tensor, .mul);
+        const result_node = self.graph.createNode(result_tensor, .mul, true) catch |err| {
+            result_tensor.deinit();
+            self.graph.allocator.destroy(result_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            result_node.deinit();
+            self.graph.allocator.destroy(result_node);
+        }
         result_node.grad_fn = mulGradFn;
 
         try result_node.addParent(self.node);
@@ -3035,10 +3120,20 @@ pub const Variable = struct {
         };
     }
 
-    pub fn matmul(self: *const Variable, other: *const Variable) !Variable {
+    pub fn matmul(self: *const Variable, other: *const Variable) TensorError!Variable {
         const result_tensor_val = try self.tensor.matmul(other.tensor);
         const result_tensor = try self.createTensorPtr(result_tensor_val);
-        const result_node = try self.graph.createNode(result_tensor, .matmul);
+        const result_node = self.graph.createNode(result_tensor, .matmul, true) catch |err| {
+            result_tensor.deinit();
+            self.graph.allocator.destroy(result_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            result_node.deinit();
+            self.graph.allocator.destroy(result_node);
+        }
         result_node.grad_fn = matmulGradFn;
 
         try result_node.addParent(self.node);
@@ -3052,10 +3147,20 @@ pub const Variable = struct {
         };
     }
 
-    pub fn relu(self: *const Variable) !Variable {
+    pub fn relu(self: *const Variable) TensorError!Variable {
         const result_tensor_val = try self.tensor.relu();
         const result_tensor = try self.createTensorPtr(result_tensor_val);
-        const result_node = try self.graph.createNode(result_tensor, .relu);
+        const result_node = self.graph.createNode(result_tensor, .relu, true) catch |err| {
+            result_tensor.deinit();
+            self.graph.allocator.destroy(result_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            result_node.deinit();
+            self.graph.allocator.destroy(result_node);
+        }
         result_node.grad_fn = reluGradFn;
 
         try result_node.addParent(self.node);
@@ -3068,10 +3173,20 @@ pub const Variable = struct {
         };
     }
 
-    pub fn sigmoid(self: *const Variable) !Variable {
+    pub fn sigmoid(self: *const Variable) TensorError!Variable {
         const result_tensor_val = try self.tensor.sigmoid();
         const result_tensor = try self.createTensorPtr(result_tensor_val);
-        const result_node = try self.graph.createNode(result_tensor, .sigmoid);
+        const result_node = self.graph.createNode(result_tensor, .sigmoid, true) catch |err| {
+            result_tensor.deinit();
+            self.graph.allocator.destroy(result_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            result_node.deinit();
+            self.graph.allocator.destroy(result_node);
+        }
         result_node.grad_fn = sigmoidGradFn;
 
         try result_node.addParent(self.node);
@@ -3084,7 +3199,7 @@ pub const Variable = struct {
         };
     }
 
-    pub fn mseLoss(self: *const Variable, target: *const Variable) !Variable {
+    pub fn mseLoss(self: *const Variable, target: *const Variable) TensorError!Variable {
         var diff = try self.tensor.sub(target.tensor);
         defer diff.deinit();
 
@@ -3096,7 +3211,17 @@ pub const Variable = struct {
         loss_tensor_val.data[0] = loss_value;
         const loss_tensor = try self.createTensorPtr(loss_tensor_val);
 
-        const loss_node = try self.graph.createNode(loss_tensor, .mse_loss);
+        const loss_node = self.graph.createNode(loss_tensor, .mse_loss, true) catch |err| {
+            loss_tensor.deinit();
+            self.graph.allocator.destroy(loss_tensor);
+            return err;
+        };
+        errdefer {
+            self.graph.next_id -= 1;
+            _ = self.graph.nodes.pop();
+            loss_node.deinit();
+            self.graph.allocator.destroy(loss_node);
+        }
         loss_node.grad_fn = mseGradFn;
 
         try loss_node.addParent(self.node);
@@ -3110,7 +3235,7 @@ pub const Variable = struct {
         };
     }
 
-    pub fn backward(self: *const Variable) !void {
+    pub fn backward(self: *const Variable) TensorError!void {
         try self.graph.backward(self.node);
     }
 
@@ -3121,7 +3246,7 @@ pub const Variable = struct {
 
 // Enhanced loss functions with regularization
 pub const LossFunctions = struct {
-    pub fn mseLoss(pred: *const Tensor, target: *const Tensor) !f32 {
+    pub fn mseLoss(pred: *const Tensor, target: *const Tensor) TensorError!f32 {
         var diff = try pred.sub(target);
         defer diff.deinit();
         var squared = try diff.square();
@@ -3129,7 +3254,7 @@ pub const LossFunctions = struct {
         return squared.sum() / @as(f32, @floatFromInt(squared.data.len));
     }
 
-    pub fn mseLossWithL1(pred: *const Tensor, target: *const Tensor, weights: *const Tensor, l1_lambda: f32) !f32 {
+    pub fn mseLossWithL1(pred: *const Tensor, target: *const Tensor, weights: *const Tensor, l1_lambda: f32) TensorError!f32 {
         const mse = try LossFunctions.mseLoss(pred, target);
         var l1_penalty: f32 = 0.0;
         for (weights.data) |w| {
@@ -3138,7 +3263,7 @@ pub const LossFunctions = struct {
         return mse + l1_lambda * l1_penalty;
     }
 
-    pub fn mseLossWithL2(pred: *const Tensor, target: *const Tensor, weights: *const Tensor, l2_lambda: f32) !f32 {
+    pub fn mseLossWithL2(pred: *const Tensor, target: *const Tensor, weights: *const Tensor, l2_lambda: f32) TensorError!f32 {
         const mse = try LossFunctions.mseLoss(pred, target);
         var l2_penalty: f32 = 0.0;
         for (weights.data) |w| {
@@ -3147,7 +3272,7 @@ pub const LossFunctions = struct {
         return mse + l2_lambda * l2_penalty * 0.5;
     }
 
-    pub fn crossEntropyLoss(logits: *const Tensor, targets: *const Tensor) !f32 {
+    pub fn crossEntropyLoss(logits: *const Tensor, targets: *const Tensor) TensorError!f32 {
         // Softmax + Cross entropy
         var loss: f32 = 0.0;
         var batch_size: usize = 1;
@@ -3197,7 +3322,7 @@ pub const LossFunctions = struct {
         custom_fn: ?CustomLossFn = null,
         context: ?*anyopaque = null,
 
-        pub fn compute(self: *const LossConfig, pred: *const Tensor, target: *const Tensor, weights: ?*const Tensor) !f32 {
+        pub fn compute(self: *const LossConfig, pred: *const Tensor, target: *const Tensor, weights: ?*const Tensor) TensorError!f32 {
             switch (self.loss_type) {
                 .mse => return LossFunctions.mseLoss(pred, target),
                 .mse_l1 => {
@@ -3501,4 +3626,122 @@ test "cross entropy loss" {
     const loss = try LossFunctions.crossEntropyLoss(&logits, &targets);
     try std.testing.expect(loss >= 0.0); // Cross entropy is always non-negative
     try std.testing.expect(loss < 1.0);  // Should be low since prediction is correct
+}
+
+test "sequential forward applies layers" {
+    const allocator = std.testing.allocator;
+
+    var seq = Sequential.init(allocator);
+
+    const linear_ptr = try allocator.create(Linear);
+    linear_ptr.* = try Linear.init(allocator, 2, 1);
+    linear_ptr.weights.data[0] = 0.5;
+    linear_ptr.weights.data[1] = -0.25;
+    linear_ptr.biases.data[0] = 0.75;
+
+    try seq.addLinear(linear_ptr);
+    try seq.addActivation(relu);
+
+    defer allocator.destroy(linear_ptr);
+    defer seq.deinit();
+
+    var input = try Tensor.init(allocator, &[_]usize{ 1, 2 });
+    defer input.deinit();
+    input.data[0] = 2.0;
+    input.data[1] = 1.0;
+
+    var output = try seq.forward(&input);
+    defer output.deinit();
+
+    try std.testing.expect(std.mem.eql(usize, output.shape, &[_]usize{ 1, 1 }));
+    try std.testing.expect(@abs(output.data[0] - 1.5) < 1e-6);
+}
+
+test "optimizer steps update parameters" {
+    const allocator = std.testing.allocator;
+
+    var params = try Tensor.init(allocator, &[_]usize{2});
+    defer params.deinit();
+    params.data[0] = 1.0;
+    params.data[1] = -1.0;
+
+    var grads = try Tensor.init(allocator, &[_]usize{2});
+    defer grads.deinit();
+    grads.data[0] = 0.2;
+    grads.data[1] = -0.4;
+
+    var optimizer = Optimizer.init(.sgd, .{ .learning_rate = 0.5 });
+    optimizer.step(&params, &grads, null, null);
+
+    try std.testing.expect(@abs(params.data[0] - 0.9) < 1e-6);
+    try std.testing.expect(@abs(params.data[1] - (-0.8)) < 1e-6);
+
+    // Adam step
+    var adam_params = try Tensor.init(allocator, &[_]usize{1});
+    defer adam_params.deinit();
+    adam_params.data[0] = 1.0;
+
+    var adam_grads = try Tensor.init(allocator, &[_]usize{1});
+    defer adam_grads.deinit();
+    adam_grads.data[0] = 0.1;
+
+    var momentum = try Tensor.init(allocator, &[_]usize{1});
+    defer momentum.deinit();
+    momentum.data[0] = 0.0;
+
+    var velocity = try Tensor.init(allocator, &[_]usize{1});
+    defer velocity.deinit();
+    velocity.data[0] = 0.0;
+
+    optimizer = Optimizer.init(.adam, .{ .learning_rate = 0.1 });
+    optimizer.step(&adam_params, &adam_grads, &momentum, &velocity);
+
+    try std.testing.expect(@abs(adam_params.data[0] - 0.9) < 1e-5);
+    try std.testing.expect(momentum.data[0] > 0.0);
+    try std.testing.expect(velocity.data[0] > 0.0);
+}
+
+test "learning rate scheduler progression" {
+    var scheduler = LearningRateScheduler.init(.step_lr, 0.1, 2, 0.5);
+    try std.testing.expect(@abs(scheduler.getLearningRate() - 0.1) < 1e-6);
+    scheduler.step();
+    try std.testing.expect(@abs(scheduler.getLearningRate() - 0.1) < 1e-6);
+    scheduler.step();
+    try std.testing.expect(@abs(scheduler.getLearningRate() - 0.05) < 1e-6);
+
+    scheduler = LearningRateScheduler.init(.exponential, 0.2, 1, 0.9);
+    try std.testing.expect(@abs(scheduler.getLearningRate() - 0.2) < 1e-6);
+    scheduler.step();
+    try std.testing.expect(@abs(scheduler.getLearningRate() - 0.18) < 1e-6);
+}
+
+test "data augmentation helpers" {
+    const allocator = std.testing.allocator;
+
+    var tensor = try Tensor.init(allocator, &[_]usize{4});
+    defer tensor.deinit();
+    tensor.data[0] = -1.0;
+    tensor.data[1] = -0.5;
+    tensor.data[2] = 0.5;
+    tensor.data[3] = 1.0;
+
+    const noise_level = 0.5;
+    var noisy = try DataAugmentation.addNoise(&tensor, noise_level, allocator);
+    defer noisy.deinit();
+    for (0..tensor.data.len) |i| {
+        const frac = @as(f32, @floatFromInt(i)) / @as(f32, @floatFromInt(tensor.data.len));
+        const expected = tensor.data[i] + (frac - 0.5) * 2.0 * noise_level;
+        try std.testing.expect(@abs(noisy.data[i] - expected) < 1e-6);
+    }
+
+    var normalized = try DataAugmentation.normalize(&tensor, 0.0, 1.0, allocator);
+    defer normalized.deinit();
+    for (0..tensor.data.len) |i| {
+        try std.testing.expect(@abs(normalized.data[i] - tensor.data[i]) < 1e-6);
+    }
+
+    var scaled = try DataAugmentation.scale(&tensor, -1.0, 1.0, allocator);
+    defer scaled.deinit();
+    try std.testing.expect(@abs(scaled.data[0] - -1.0) < 1e-6);
+    try std.testing.expect(@abs(scaled.data[3] - 1.0) < 1e-6);
 }

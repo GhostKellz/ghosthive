@@ -32,6 +32,11 @@ to change!
 - Loss functions (MSE)
 - Basic training with Adam
 
+## Quickstart & Docs
+
+- 🚀 New to GhostHive? Start with the [Quickstart guide](docs/quickstart.md) for a scaffolded project walkthrough.
+- 📘 Need API details? Head over to the [API reference](docs/API.md) and [Examples](docs/examples.md) for in-depth docs and runnable snippets.
+
 ## Zig Integration 
 ```bash
 zig fetch --save https://github.com/ghostkellz/ghostmind/archive/refs/heads/main.tar.gz
@@ -66,4 +71,4 @@ Run `zig build run` to see a linear regression demo with Adam.
 
 ## Documentation
 
-See [docs/](docs/) for API reference and examples.
+See [docs/](docs/) for the Quickstart, API reference, and expanded examples.

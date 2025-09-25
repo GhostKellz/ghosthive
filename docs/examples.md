@@ -1,5 +1,7 @@
 # GhostHive Examples
 
+Looking for a guided setup first? Check out the [Quickstart](./quickstart.md). The snippets below assume you already have GhostHive wired into your build.
+
 ## Linear Regression
 
 ```zig

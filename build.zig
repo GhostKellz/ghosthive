@@ -28,6 +28,11 @@ pub fn build(b: *std.Build) void {
     // to our consumers. We must give it a name because a Zig package can expose
     // multiple modules and consumers will need to be able to specify which
     // module they want to access.
+    const enable_gpu = b.option(bool, "enable-gpu", "Enable experimental GPU/device support") orelse false;
+
+    const build_options = b.addOptions();
+    build_options.addOption(bool, "enable_gpu", enable_gpu);
+
     const mod = b.addModule("ghosthive", .{
         // The root source file is the "entry point" of this module. Users of
         // this module will only be able to access public declarations contained
@@ -40,6 +45,8 @@ pub fn build(b: *std.Build) void {
         // which requires us to specify a target.
         .target = target,
     });
+
+    mod.addOptions("build_options", build_options);
 
     // Here we define an executable. An executable needs to have a root module
     // which needs to expose a `main` function. While we could add a main function
@@ -83,6 +90,8 @@ pub fn build(b: *std.Build) void {
         }),
     });
 
+    exe.root_module.addOptions("build_options", build_options);
+
     // Link libc for CUDA and other GPU APIs that require C linkage
     exe.linkLibC();
 
@@ -121,9 +130,8 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the provided module.
     // Here `mod` needs to define a target, which is why earlier we made sure to
     // set the releative field.
-    const mod_tests = b.addTest(.{
-        .root_module = mod,
-    });
+    const mod_tests = b.addTest(.{ .root_module = mod });
+    mod_tests.root_module.addOptions("build_options", build_options);
 
     // A run step that will run the test executable.
     const run_mod_tests = b.addRunArtifact(mod_tests);
@@ -131,9 +139,8 @@ pub fn build(b: *std.Build) void {
     // Creates an executable that will run `test` blocks from the executable's
     // root module. Note that test executables only test one module at a time,
     // hence why we have to create two separate ones.
-    const exe_tests = b.addTest(.{
-        .root_module = exe.root_module,
-    });
+    const exe_tests = b.addTest(.{ .root_module = exe.root_module });
+    exe_tests.root_module.addOptions("build_options", build_options);
 
     // A run step that will run the second test executable.
     const run_exe_tests = b.addRunArtifact(exe_tests);
